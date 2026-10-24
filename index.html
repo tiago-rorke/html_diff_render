@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Commit diff HTML renderer</title>
+<style>
+:root{
+  --bg:#f6f5f2; --panel:#ffffff; --ink:#1c1e21; --muted:#6a6f76; --line:#d9d6cf;
+  --accent:#2b5fd9; --add:#1a7f37; --add-bg:#dafbe1; --del:#cf222e; --del-bg:#ffebe9; --hunk:#6639ba;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#16181b; --panel:#1f2226; --ink:#e7e8ea; --muted:#9298a0; --line:#333840;
+    --accent:#7aa2ff; --add:#56d364; --add-bg:#12301c; --del:#ff7b72; --del-bg:#3a1618; --hunk:#b392f0;
+    color-scheme: dark;
+  }
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 "Iowan Old Style","Palatino Linotype",Georgia,serif;display:flex;flex-direction:column}
+button,input,select{font:inherit;color:inherit}
+header{padding:14px 20px;border-bottom:1px solid var(--line);background:var(--panel);display:flex;flex-wrap:wrap;gap:10px 14px;align-items:end}
+label{display:flex;flex-direction:column;font:12px/1.2 system-ui,sans-serif;color:var(--muted);gap:4px}
+input{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:7px 9px;min-width:200px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px}
+input.tok{min-width:150px} input.wide{min-width:min(420px,80vw)}
+button{border:1px solid var(--line);background:var(--bg);border-radius:6px;padding:7px 12px;cursor:pointer;font-family:system-ui,sans-serif;font-size:14px}
+button:hover{border-color:var(--accent)}
+button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+button.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+button[disabled]{opacity:.55;cursor:progress}
+#meta{padding:12px 20px;border-bottom:1px solid var(--line);display:none;gap:4px 18px;flex-wrap:wrap;align-items:baseline}
+#meta .msg{font-size:17px;font-weight:600;flex-basis:100%}
+#meta .sub{font:13px/1.4 system-ui,sans-serif;color:var(--muted)}
+#meta a{color:var(--accent)}
+.plus{color:var(--add)} .minus{color:var(--del)}
+#bar{padding:8px 20px;display:none;gap:8px;align-items:center;flex-wrap:wrap;border-bottom:1px solid var(--line)}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:6px;overflow:hidden}
+.seg button{border:0;border-radius:0;background:var(--panel)}
+.seg button[aria-pressed="true"]{background:var(--ink);color:var(--bg)}
+label.opt{flex-direction:row;align-items:center;gap:6px;font:13px/1.2 system-ui,sans-serif;color:var(--ink);cursor:pointer}
+label.opt input{min-width:0;margin:0}
+#hlnote{font:12px system-ui,sans-serif;color:var(--muted)}
+select{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:6px 8px;max-width:420px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px}
+main{flex:1;min-height:0;display:flex;flex-direction:column}
+#status{margin:auto;padding:30px;text-align:center;color:var(--muted);max-width:520px;font-size:16px}
+#status.err{color:var(--del)}
+.panes{flex:1;min-height:0;display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--line)}
+.pane{display:flex;flex-direction:column;min-width:0;background:var(--panel)}
+.pane h2{margin:0;padding:6px 12px;font:600 12px/1.4 system-ui,sans-serif;border-bottom:1px solid var(--line)}
+.pane.before h2{color:var(--del)} .pane.after h2{color:var(--add)}
+iframe{flex:1;width:100%;border:0;background:#fff;min-height:320px}
+.panes.flip{grid-template-columns:1fr}
+.panes.flip .pane:not(.on){display:none}
+pre.diff{margin:0;flex:1;overflow:auto;padding:0;font:12.5px/1.5 ui-monospace,Menlo,Consolas,monospace;background:var(--panel)}
+pre.diff span{display:block;padding:0 14px;white-space:pre-wrap;word-break:break-word}
+.l-add{background:var(--add-bg)} .l-del{background:var(--del-bg)} .l-hunk{color:var(--hunk);padding-top:6px!important}
+.note{padding:14px 20px;font:13px/1.5 system-ui,sans-serif;color:var(--muted)}
+@media (max-width:760px){.panes:not(.flip){grid-template-columns:1fr;grid-auto-rows:60vh}}
+@media (prefers-reduced-motion:no-preference){button{transition:border-color .12s}}
+</style>
+</head>
+<body>
+<header>
+  <label>Commit URL, or owner/repo@sha
+    <input id="repo" class="wide" placeholder="https://github.com/owner/repo/commit/abc1234" autocomplete="off" spellcheck="false">
+  </label>
+  <label>GitHub token (optional, avoids rate limits)
+    <input id="tok" class="tok" type="password" placeholder="ghp_…" autocomplete="off">
+  </label>
+  <button id="go" class="primary">Show diff</button>
+</header>
+
+<section id="meta"></section>
+<section id="bar">
+  <div class="seg" role="group" aria-label="View">
+    <button data-v="side" aria-pressed="true">Side by side</button>
+    <button data-v="flip" aria-pressed="false">Flip</button>
+    <button data-v="src" aria-pressed="false">Source diff</button>
+  </div>
+  <button id="flipbtn" hidden>Showing: After (space to flip)</button>
+  <label class="opt"><input type="checkbox" id="optHl" checked> Highlight text changes</label>
+  <span id="hlnote"></span>
+  <select id="files" hidden aria-label="Changed HTML files in this commit"></select>
+</section>
+
+<main id="main">
+  <div id="status">Paste a GitHub commit URL (or type owner/repo@sha) and press Show diff. The tool renders each changed HTML file as it was before and after that commit.</div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const encPath = p => p.split('/').map(encodeURIComponent).join('/');
+
+let cur = null;       // { repo, commit, files, idx, before, after }
+let view = 'side';
+let flipSide = 'after';
+
+async function gh(path){
+  const h = { Accept: 'application/vnd.github+json' };
+  const t = $('tok').value.trim();
+  if (t) h.Authorization = 'Bearer ' + t;
+  const r = await fetch('https://api.github.com' + path, { headers: h });
+  if (r.status === 403 || r.status === 429) {
+    throw new Error('GitHub rate limit reached. Wait a bit, or paste a personal access token (no scopes needed) in the token field.');
+  }
+  if (r.status === 404) throw new Error('Not found. Check that the repo exists and is public.');
+  if (!r.ok) throw new Error('GitHub returned ' + r.status + '.');
+  return r.json();
+}
+
+async function raw(repo, sha, path){
+  const r = await fetch(`https://raw.githubusercontent.com/${repo}/${sha}/${encPath(path)}`);
+  if (!r.ok) throw new Error('Could not load ' + path + ' at ' + sha.slice(0,7));
+  return r.text();
+}
+
+function setStatus(msg, isErr){
+  $('main').innerHTML = `<div id="status" class="${isErr ? 'err' : ''}">${esc(msg)}</div>`;
+}
+
+function parseInput(v){
+  v = v.trim();
+  let m = v.match(/github\.com\/([\w.-]+\/[\w.-]+)\/(?:pull\/\d+\/commits|commit)\/([0-9a-f]{7,40})/i);
+  if (m) return { repo: m[1], sha: m[2] };
+  m = v.match(/^([\w.-]+\/[\w.-]+)[@#\s]+([0-9a-f]{7,40})$/i);
+  if (m) return { repo: m[1], sha: m[2] };
+  v = v.replace(/^https?:\/\/github\.com\//,'').replace(/\.git$/,'').replace(/\/$/,'');
+  if (/^[\w.-]+\/[\w.-]+$/.test(v)) return { repo: v, sha: null };
+  if (!v) return { repo: null, sha: null };
+  throw new Error('Could not read that. Use a commit URL like https://github.com/owner/repo/commit/abc1234, or owner/repo@abc1234.');
+}
+
+function begin(){
+  $('go').disabled = true;
+  $('meta').style.display = 'none';
+  $('bar').style.display = 'none';
+}
+function end(){ $('go').disabled = false; }
+
+async function openCommit(repo, ref, preferFile){
+  setStatus('Fetching commit ' + ref.slice(0,7) + '…');
+  const detail = await gh(`/repos/${repo}/commits/${encodeURIComponent(ref)}`);
+  const files = (detail.files || []).filter(f => /\.html?$/i.test(f.filename));
+  if (!files.length) throw new Error('That commit did not change any .html or .htm files. It changed ' + (detail.files || []).length + ' other file(s).');
+  const idx = Math.max(0, files.findIndex(f => f.filename === preferFile));
+  cur = { repo, commit: detail, files, idx, before: null, after: null };
+  await loadFile();
+}
+
+async function showCommit(){
+  begin();
+  try {
+    const { repo, sha } = parseInput($('repo').value);
+    if (!repo) throw new Error('Paste a commit URL first.');
+    if (!sha) throw new Error('That is a repo, not a commit. Add a commit hash, like owner/repo@abc1234.');
+    await openCommit(repo, sha);
+  } catch (e) { setStatus(e.message || String(e), true); }
+  finally { end(); }
+}
+
+async function loadFile(){
+  const { repo, commit, files, idx } = cur;
+  const f = files[idx];
+  setStatus('Loading ' + f.filename + '…');
+  const parent = commit.parents && commit.parents[0] && commit.parents[0].sha;
+  const added = f.status === 'added';
+  const removed = f.status === 'removed';
+  const [before, after] = await Promise.all([
+    (added || !parent) ? '' : raw(repo, parent, f.previous_filename || f.filename),
+    removed ? '' : raw(repo, commit.sha, f.filename)
+  ]);
+  cur.before = before; cur.after = after;
+  cur.parent = parent;
+  renderMeta();
+  renderBody();
+}
+
+function renderMeta(){
+  const { repo, commit, files, idx } = cur;
+  const f = files[idx];
+  const first = (commit.commit.message || '').split('\n')[0];
+  const d = new Date(commit.commit.author.date);
+  $('meta').style.display = 'flex';
+  $('meta').innerHTML = `
+    <div class="msg">${esc(first)}</div>
+    <div class="sub"><a href="${esc(commit.html_url)}" target="_blank" rel="noopener">${esc(repo)}@${esc(commit.sha.slice(0,7))}</a></div>
+    <div class="sub">${esc(commit.commit.author.name)} on ${esc(d.toLocaleDateString(undefined,{year:'numeric',month:'short',day:'numeric'}))}</div>
+    <div class="sub">${esc(f.filename)} (${esc(f.status)}) <span class="plus">+${f.additions}</span> <span class="minus">−${f.deletions}</span></div>`;
+  $('bar').style.display = 'flex';
+  const sel = $('files');
+  if (files.length > 1) {
+    sel.hidden = false;
+    sel.innerHTML = files.map((x,i) => `<option value="${i}" ${i===idx?'selected':''}>${esc(x.filename)}</option>`).join('');
+  } else sel.hidden = true;
+}
+
+const CLEAN_CSS = `
+html{-webkit-text-size-adjust:100%}
+body{font:16px/1.6 system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;color:#1c1e21;background:#fff;max-width:880px;margin:0 auto;padding:16px 20px;overflow-wrap:anywhere}
+h1,h2,h3,h4,h5,h6{line-height:1.25}
+a{color:#2b5fd9}
+img,video{max-width:100%!important;height:auto}
+table{border-collapse:collapse;max-width:100%}
+td,th{padding:4px 8px;vertical-align:top}
+pre,code,kbd,samp{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:.92em}
+pre{max-width:100%;overflow:auto;white-space:pre-wrap}
+iframe{max-width:100%}
+`;
+const HL_CSS = `
+.__d{background:rgba(207,34,46,.16);border-radius:2px}
+.__a{background:rgba(26,127,55,.18);border-radius:2px}
+`;
+const SKIP = 'script,style,noscript,template,textarea,title';
+
+function collect(doc){
+  const out = [];
+  const w = doc.createTreeWalker(doc.body || doc.documentElement, NodeFilter.SHOW_TEXT);
+  let n;
+  while ((n = w.nextNode())) {
+    if (!n.nodeValue.trim() || (n.parentElement && n.parentElement.closest(SKIP))) continue;
+    out.push({ n, parts: n.nodeValue.split(/(\s+)/) });
+  }
+  return out;
+}
+function words(entries){
+  const seq = [], ref = [];
+  entries.forEach((e, i) => e.parts.forEach((p, j) => { if (j % 2 === 0 && p) { seq.push(p); ref.push([i, j]); } }));
+  return { seq, ref };
+}
+
+// Myers O(ND) diff. Returns null if the edit distance exceeds max.
+function myers(a, b, max){
+  const n = a.length, m = b.length, MAX = Math.min(n + m, max), off = MAX + 1;
+  let v = new Int32Array(2 * MAX + 3);
+  const trace = [];
+  for (let d = 0; d <= MAX; d++) {
+    trace.push(v.slice());
+    for (let k = -d; k <= d; k += 2) {
+      let x = (k === -d || (k !== d && v[off + k - 1] < v[off + k + 1])) ? v[off + k + 1] : v[off + k - 1] + 1;
+      let y = x - k;
+      while (x < n && y < m && a[x] === b[y]) { x++; y++; }
+      v[off + k] = x;
+      if (x >= n && y >= m) {
+        const del = new Uint8Array(n), add = new Uint8Array(m);
+        let cx = n, cy = m;
+        for (let dd = d; dd > 0; dd--) {
+          const pv = trace[dd], ck = cx - cy;
+          const pk = (ck === -dd || (ck !== dd && pv[off + ck - 1] < pv[off + ck + 1])) ? ck + 1 : ck - 1;
+          const px = pv[off + pk], py = px - pk;
+          while (cx > px && cy > py) { cx--; cy--; }
+          if (cx === px) add[py] = 1; else del[px] = 1;
+          cx = px; cy = py;
+        }
+        return { del, add };
+      }
+    }
+  }
+  return null;
+}
+
+function diffWords(a, b){
+  const n = a.length, m = b.length;
+  let pre = 0;
+  while (pre < n && pre < m && a[pre] === b[pre]) pre++;
+  let suf = 0;
+  while (suf < n - pre && suf < m - pre && a[n - 1 - suf] === b[m - 1 - suf]) suf++;
+  const a2 = a.slice(pre, n - suf), b2 = b.slice(pre, m - suf);
+  const del = new Uint8Array(n), add = new Uint8Array(m);
+  let r;
+  if (!a2.length) r = { del: new Uint8Array(0), add: new Uint8Array(b2.length).fill(1) };
+  else if (!b2.length) r = { del: new Uint8Array(a2.length).fill(1), add: new Uint8Array(0) };
+  else r = myers(a2, b2, 1500);
+  if (!r) return null;
+  del.set(r.del, pre); add.set(r.add, pre);
+  return { del, add };
+}
+
+function mark(entries, ref, flags, cls, doc){
+  const per = entries.map(() => new Set());
+  ref.forEach(([i, j], k) => { if (flags[k]) per[i].add(j); });
+  entries.forEach((e, i) => {
+    if (!per[i].size) return;
+    const frag = doc.createDocumentFragment();
+    let run = null;
+    e.parts.forEach((p, j) => {
+      if (!p) return;
+      const flagged = j % 2 === 0 ? per[i].has(j) : (run && per[i].has(j + 1));
+      if (flagged) {
+        if (!run) { run = doc.createElement('span'); run.className = cls; frag.appendChild(run); }
+        run.appendChild(doc.createTextNode(p));
+      } else {
+        run = null;
+        frag.appendChild(doc.createTextNode(p));
+      }
+    });
+    e.n.replaceWith(frag);
+  });
+}
+
+function serialize(doc, raw, path, opts){
+  if (!raw.trim()) return '<body style="font:14px system-ui;color:#777;padding:20px">(file does not exist in this version)</body>';
+  const dir = path.includes('/') ? path.slice(0, path.lastIndexOf('/') + 1) : '';
+  const head = doc.head;
+  const css = (opts.clean ? CLEAN_CSS : '') + (opts.hl ? HL_CSS : '');
+  if (css) { const st = doc.createElement('style'); st.textContent = css; head.insertBefore(st, head.firstChild); }
+  if (opts.clean) {
+    const mv = doc.createElement('meta');
+    mv.setAttribute('name', 'viewport'); mv.setAttribute('content', 'width=device-width, initial-scale=1');
+    head.insertBefore(mv, head.firstChild);
+  }
+  const base = doc.createElement('base');
+  base.setAttribute('href', `https://cdn.jsdelivr.net/gh/${cur.repo}@${cur.commit.sha}/${encPath(dir)}`);
+  head.insertBefore(base, head.firstChild);
+  return '<!DOCTYPE html>\n' + doc.documentElement.outerHTML;
+}
+
+function buildPair(beforeHtml, afterHtml, bPath, aPath){
+  const opts = { clean: true, hl: $('optHl').checked };
+  const P = new DOMParser();
+  const da = P.parseFromString(beforeHtml, 'text/html');
+  const db = P.parseFromString(afterHtml, 'text/html');
+  $('hlnote').textContent = '';
+  if (opts.hl && beforeHtml.trim() && afterHtml.trim()) {
+    const ea = collect(da), eb = collect(db), wa = words(ea), wb = words(eb);
+    const r = diffWords(wa.seq, wb.seq);
+    if (r) { mark(ea, wa.ref, r.del, '__d', da); mark(eb, wb.ref, r.add, '__a', db); }
+    else $('hlnote').textContent = 'Too many text changes to highlight; use Source diff.';
+  }
+  return [serialize(da, beforeHtml, bPath, opts), serialize(db, afterHtml, aPath, opts)];
+}
+
+function renderBody(){
+  const f = cur.files[cur.idx];
+  const main = $('main');
+  document.querySelectorAll('.seg button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.v === view)));
+  $('flipbtn').hidden = view !== 'flip';
+  if (view === 'src') {
+    if (!f.patch) { main.innerHTML = '<div class="note">GitHub did not include a text patch for this file (it may be too large).</div>'; return; }
+    main.innerHTML = '<pre class="diff">' + f.patch.split('\n').map(l => {
+      const c = l.startsWith('@@') ? 'l-hunk' : l[0] === '+' ? 'l-add' : l[0] === '-' ? 'l-del' : '';
+      return `<span class="${c}">${esc(l) || ' '}</span>`;
+    }).join('') + '</pre>';
+    return;
+  }
+  const bPath = f.previous_filename || f.filename;
+  main.innerHTML = `
+    <div class="panes ${view === 'flip' ? 'flip' : ''}">
+      <div class="pane before ${flipSide === 'before' ? 'on' : ''}"><h2>Before (parent commit)</h2><iframe sandbox title="Before"></iframe></div>
+      <div class="pane after ${flipSide === 'after' ? 'on' : ''}"><h2>After (this commit)</h2><iframe sandbox title="After"></iframe></div>
+    </div>`;
+  const fr = main.querySelectorAll('iframe');
+  const [sb, sa] = buildPair(cur.before, cur.after, bPath, f.filename);
+  fr[0].srcdoc = sb;
+  fr[1].srcdoc = sa;
+  $('flipbtn').textContent = 'Showing: ' + (flipSide === 'after' ? 'After' : 'Before') + ' (space to flip)';
+}
+
+function flip(){
+  flipSide = flipSide === 'after' ? 'before' : 'after';
+  renderBody();
+}
+
+$('go').addEventListener('click', showCommit);
+$('repo').addEventListener('keydown', e => { if (e.key === 'Enter') showCommit(); });
+$('files').addEventListener('change', async e => {
+  cur.idx = +e.target.value;
+  try { await loadFile(); } catch (err) { setStatus(err.message, true); }
+});
+$('flipbtn').addEventListener('click', flip);
+$('optHl').addEventListener('change', () => { if (cur) renderBody(); });
+document.querySelectorAll('.seg button').forEach(b => b.addEventListener('click', () => {
+  if (!cur) { view = b.dataset.v; document.querySelectorAll('.seg button').forEach(x => x.setAttribute('aria-pressed', String(x === b))); return; }
+  view = b.dataset.v; renderBody();
+}));
+const q = new URLSearchParams(location.search).get('c');
+if (q) { $('repo').value = q; showCommit(); }
+
+document.addEventListener('keydown', e => {
+  if (e.code === 'Space' && view === 'flip' && cur && !/INPUT|SELECT|BUTTON/.test(document.activeElement.tagName)) { e.preventDefault(); flip(); }
+});
+</script>
+</body>
+</html>
